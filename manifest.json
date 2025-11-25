@@ -1,0 +1,26 @@
+{
+  "name": "relatorio_MCR",
+  "label": "Relatório MCR",
+  "type": "widget",
+  "version": "1.0.0",
+  "exbVersion": "1.14.0",
+  "author": "Thyego Pery",
+  "description": "Widget para gerar relatórios MCR usando dados de uma camada.",
+  "properties": {
+    "hasSettingPage": true
+  },
+  "supportedLocales": [
+    "pt-br",
+    "en"
+  ],
+  "dependency": [
+    "jimu-arcgis"
+  ],
+  "useDataSources": [
+    {
+      "types": [
+        "FEATURE_LAYER"
+      ]
+    }
+  ]
+}
