@@ -37,36 +37,6 @@ const PDF_FIELDS_AFTER_RESULTADO: Array<{
 
 const FIELD_LINE_SPACING = 6
 
-/** Bloco "Resultado:" (rótulo em negrito + texto com o mesmo espaçamento dos demais campos). */
-const writeResultadoBlock = (
-  pdf: InstanceType<typeof jsPDF>,
-  margin: number,
-  pageH: number,
-  startY: number,
-  text: string,
-  maxWidth: number
-): number => {
-  let y = startY
-  if (y > pageH - margin - 8) {
-    pdf.addPage()
-    y = margin
-  }
-  pdf.setFont('helvetica', 'bold')
-  pdf.text('Resultado:', margin, y)
-  y += FIELD_LINE_SPACING
-  pdf.setFont('helvetica', 'normal')
-  const lines = pdf.splitTextToSize(text ?? '', maxWidth) as string[]
-  lines.forEach((line) => {
-    if (y > pageH - margin - 8) {
-      pdf.addPage()
-      y = margin
-    }
-    pdf.text(line, margin, y)
-    y += FIELD_LINE_SPACING
-  })
-  return y
-}
-
 type PdfContext = {
   pdf: InstanceType<typeof jsPDF>
   margin: number
@@ -95,15 +65,17 @@ const writeImovelStyleLine = (
     const fullLine = `${label}${valueText}`
     const lines = pdf.splitTextToSize(fullLine, maxWidth) as string[]
     pdf.setFont('helvetica', 'normal')
-    lines.forEach((line) => {
+    lines.forEach((line, index) => {
       if (y > pageH - ctx.margin - 8) {
         pdf.addPage()
         y = ctx.margin
       }
       pdf.text(line, margin, y)
-      y += FIELD_LINE_SPACING
+      if (index < lines.length - 1) {
+        y += FIELD_LINE_SPACING
+      }
     })
-    return y
+    return y + FIELD_LINE_SPACING
   }
 
   pdf.setFont('helvetica', 'bold')
@@ -121,16 +93,15 @@ const writeImovelStyleLine = (
   }
 
   pdf.text(valueLines[0] ?? '', margin + labelWidth, y)
-  y += FIELD_LINE_SPACING
   for (let i = 1; i < valueLines.length; i++) {
+    y += FIELD_LINE_SPACING
     if (y > pageH - ctx.margin - 8) {
       pdf.addPage()
       y = ctx.margin
     }
     pdf.text(valueLines[i], margin, y)
-    y += FIELD_LINE_SPACING
   }
-  return y
+  return y + FIELD_LINE_SPACING
 }
 
 const formatPdfFieldValue = (
@@ -365,24 +336,23 @@ const Widget = (props: AllWidgetProps<IMConfig>) => {
       cursorY += 6
 
       const contentMaxWidth = pageW - margin - margin
-      const resultado = get('resultados')
-      const resultadoTxt =
-        resultado != null && resultado !== '' ? String(resultado) : '(sem resultado)'
-      cursorY = writeResultadoBlock(
-        pdf,
-        margin,
-        pageH,
-        cursorY,
-        resultadoTxt,
-        contentMaxWidth
-      )
-
       const pdfCtx: PdfContext = {
         pdf,
         margin,
         pageH,
         maxWidth: contentMaxWidth
       }
+
+      const resultado = get('resultados')
+      const resultadoTxt =
+        resultado != null && resultado !== '' ? String(resultado) : '(sem resultado)'
+      cursorY = writeImovelStyleLine(
+        pdfCtx,
+        'Resultado:',
+        resultadoTxt,
+        cursorY,
+        false
+      )
 
       PDF_FIELDS_AFTER_RESULTADO.forEach(({ label, fieldNames, formatAsNumber, labelBold }) => {
         const raw = readRecordField(first, fieldNames)
