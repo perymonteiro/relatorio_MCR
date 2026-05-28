@@ -64,9 +64,20 @@ const ensurePdfY = (
 const nextFieldY = (lastBaseline: number): number =>
   lastBaseline + FIELD_LINE_SPACING
 
+/** Texto restante após o primeiro segmento (quebra na mesma linha do rótulo). */
+const sliceRemainderAfterFirstSegment = (
+  fullText: string,
+  firstSegment: string
+): string => {
+  if (!firstSegment) return fullText.trim()
+  const idx = fullText.indexOf(firstSegment)
+  if (idx < 0) return fullText.trim()
+  return fullText.slice(idx + firstSegment.length).trim()
+}
+
 /**
  * Campo "rótulo: valor".
- * labelBold=true → rótulo em negrito e valor na mesma linha (quebras alinhadas ao valor).
+ * labelBold=true → rótulo em negrito, 1ª linha do valor ao lado; demais linhas na margem esquerda.
  */
 const writeImovelStyleLine = (
   ctx: PdfContext,
@@ -95,29 +106,37 @@ const writeImovelStyleLine = (
     return nextFieldY(lastBaseline)
   }
 
+  const plainValue = String(value).trim()
   pdf.setFont('helvetica', 'bold')
   const labelWidth = pdf.getTextWidth(label)
   const valueX = margin + labelWidth + LABEL_VALUE_GAP_MM
-  const valueMaxWidth = maxWidth - (valueX - margin)
+  const firstLineMaxWidth = Math.max(maxWidth - (valueX - margin), 20)
+
   pdf.setFont('helvetica', 'normal')
-  const valueLines = pdf.splitTextToSize(
-    String(value).trim(),
-    Math.max(valueMaxWidth, 20)
+  const firstLineParts = pdf.splitTextToSize(
+    plainValue,
+    firstLineMaxWidth
   ) as string[]
+  const firstLineText = firstLineParts[0] ?? ''
+  const remainder = sliceRemainderAfterFirstSegment(plainValue, firstLineText)
+  const continuationLines = remainder.length
+    ? (pdf.splitTextToSize(remainder, maxWidth) as string[])
+    : []
 
   pdf.setFont('helvetica', 'bold')
   pdf.text(label, margin, y)
   pdf.setFont('helvetica', 'normal')
 
-  if (valueLines.length > 0) {
-    pdf.text(valueLines[0] ?? '', valueX, y)
+  if (firstLineText) {
+    pdf.text(firstLineText, valueX, y)
     lastBaseline = y
-    for (let i = 1; i < valueLines.length; i++) {
-      y += FIELD_LINE_SPACING
-      y = ensurePdfY(pdf, margin, pageH, y)
-      pdf.text(valueLines[i], valueX, y)
-      lastBaseline = y
-    }
+  }
+
+  for (const line of continuationLines) {
+    y += FIELD_LINE_SPACING
+    y = ensurePdfY(pdf, margin, pageH, y)
+    pdf.text(line, margin, y)
+    lastBaseline = y
   }
 
   return nextFieldY(lastBaseline)
