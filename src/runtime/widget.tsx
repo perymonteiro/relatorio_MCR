@@ -37,6 +37,36 @@ const PDF_FIELDS_AFTER_RESULTADO: Array<{
 
 const FIELD_LINE_SPACING = 6
 
+/** Bloco "Resultado:" (rótulo em negrito + texto com o mesmo espaçamento dos demais campos). */
+const writeResultadoBlock = (
+  pdf: InstanceType<typeof jsPDF>,
+  margin: number,
+  pageH: number,
+  startY: number,
+  text: string,
+  maxWidth: number
+): number => {
+  let y = startY
+  if (y > pageH - margin - 8) {
+    pdf.addPage()
+    y = margin
+  }
+  pdf.setFont('helvetica', 'bold')
+  pdf.text('Resultado:', margin, y)
+  y += FIELD_LINE_SPACING
+  pdf.setFont('helvetica', 'normal')
+  const lines = pdf.splitTextToSize(text ?? '', maxWidth) as string[]
+  lines.forEach((line) => {
+    if (y > pageH - margin - 8) {
+      pdf.addPage()
+      y = margin
+    }
+    pdf.text(line, margin, y)
+    y += FIELD_LINE_SPACING
+  })
+  return y
+}
+
 type PdfContext = {
   pdf: InstanceType<typeof jsPDF>
   margin: number
@@ -334,16 +364,18 @@ const Widget = (props: AllWidgetProps<IMConfig>) => {
       pdf.text(`Município/UF: ${municipio}/${uf}`, margin, cursorY)
       cursorY += 6
 
+      const contentMaxWidth = pageW - margin - margin
       const resultado = get('resultados')
       const resultadoTxt =
         resultado != null && resultado !== '' ? String(resultado) : '(sem resultado)'
-      pdf.setFont('helvetica', 'bold')
-      pdf.text('Resultado:', margin, cursorY)
-      cursorY += 5
-      pdf.setFont('helvetica', 'normal')
-      const contentMaxWidth = pageW - margin - margin
-      cursorY = writeWrapped(resultadoTxt, margin, cursorY, contentMaxWidth)
-      cursorY += 5
+      cursorY = writeResultadoBlock(
+        pdf,
+        margin,
+        pageH,
+        cursorY,
+        resultadoTxt,
+        contentMaxWidth
+      )
 
       const pdfCtx: PdfContext = {
         pdf,

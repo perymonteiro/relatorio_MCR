@@ -19,12 +19,46 @@ interface Props {
 }
 
 const styles = css`
+  &.widget-setting-relatorio-mcr {
+    width: 100%;
+    min-width: 0;
+    overflow: visible;
+    box-sizing: border-box;
+  }
   & * {
     writing-mode: horizontal-tb !important;
     white-space: normal !important;
     word-break: normal !important;
+    box-sizing: border-box;
   }
-  .jimu-ui_setting-row__label { min-width: 160px; }
+  .jimu-ui_setting-row {
+    overflow: visible;
+    flex-wrap: wrap;
+  }
+  .jimu-ui_setting-row__label {
+    min-width: 0;
+    max-width: 100%;
+    flex: 1 1 100%;
+  }
+  .jimu-ui_setting-row__content {
+    flex: 1 1 100%;
+    min-width: 0;
+    max-width: 100%;
+    overflow: visible;
+  }
+  .setting-field-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+    min-width: 0;
+  }
+  .setting-hint {
+    font-size: 12px;
+    color: #6b6b6b;
+    line-height: 1.4;
+    word-wrap: break-word;
+  }
 `
 
 const anosValidos = (anos: number[]) => {
@@ -59,9 +93,13 @@ const Setting = (props: Props) => {
   }
 
   return (
-    <div className="widget-setting-relatorio-mcr" css={styles}>
+    <div className="widget-setting-relatorio-mcr jimu-widget-setting w-100" css={styles}>
       <SettingSection title="Dados">
-        <SettingRow label="Selecionar camada (Feature Layer)">
+        <SettingRow
+          label="Camada (Feature Layer)"
+          flow="wrap"
+          level={1}
+        >
           <DataSourceSelector
             isMultiple={false}
             mustUseDataSource
@@ -72,16 +110,17 @@ const Setting = (props: Props) => {
           />
         </SettingRow>
 
-        <SettingRow label="Anos PRODES (CSV)">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%' }}>
+        <SettingRow label="Anos PRODES (CSV)" flow="wrap" level={1}>
+          <div className="setting-field-stack">
             <TextInput
               size="sm"
               placeholder="Ex.: 2023, 2024"
               defaultValue={anos.join(', ')}
               onAcceptValue={handleAnosChange}
             />
-            <div style={{ fontSize: 12, color: '#6b6b6b' }}>
-              Informe anos entre 2019 e 2030 separados por vírgula. Ex.: <code>2023, 2024</code>
+            <div className="setting-hint">
+              Informe anos entre 2019 e 2030 separados por vírgula. Ex.:{' '}
+              <code>2023, 2024</code>
             </div>
           </div>
         </SettingRow>
