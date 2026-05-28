@@ -12,12 +12,20 @@ import {
 } from 'jimu-core'
 import type { IGeometry } from '@esri/arcgis-rest-request'
 
-const VIEW_READY_TIMEOUT_MS = 10000
+const VIEW_READY_TIMEOUT_MS = 20000
 const SCREENSHOT_WIDTH = 900
 const SCREENSHOT_HEIGHT = 675
+const MIN_VIEW_WIDTH = 320
+const MIN_VIEW_HEIGHT = 240
+const SCREENSHOT_RETRY_DELAYS_MS = [0, 600, 1200, 2000, 3500, 5000]
+const CAPTURE_PASS_DELAYS_MS = [0, 1500, 3000]
+const SCREENSHOT_JPEG_QUALITY = 0.82
+const PDF_IMAGE_MAX_WIDTH = 900
 /** Margem extra ao enquadrar o imóvel (expand no extent + padding em px no goTo). */
 const MAP_FIT_EXTENT_FACTOR = 1.4
 const MAP_FIT_PADDING_PX = 72
+
+export type MapImageFormat = 'PNG' | 'JPEG'
 
 /** IDs de widgets Map (arcgis-map) na aplicação. */
 export const discoverArcgisMapWidgetIds = (): string[] => {
@@ -89,6 +97,12 @@ const mapContainsLayer = (jimuMapView: JimuMapView, layerDataSourceIds: string[]
   return layerViews.some((lv) => layerDataSourceIds.includes(lv.layerDataSourceId))
 }
 
+const viewPixelArea = (jimuMapView: JimuMapView): number => {
+  const w = jimuMapView.view?.width ?? 0
+  const h = jimuMapView.view?.height ?? 0
+  return w > 0 && h > 0 ? w * h : 0
+}
+
 const isMapViewUsable = (jimuMapView: JimuMapView | null | undefined): jimuMapView is JimuMapView => {
   return !!jimuMapView?.view
 }
@@ -127,7 +141,10 @@ const waitForViewStationary = async (view: __esri.MapView | __esri.SceneView): P
     // segue mesmo se when falhar
   }
 
-  if (!view.updating) return
+  if (!view.updating) {
+    await waitForLayerViewsReady(view)
+    return
+  }
 
   await new Promise<void>((resolve) => {
     const timeout = window.setTimeout(() => {
@@ -143,6 +160,209 @@ const waitForViewStationary = async (view: __esri.MapView | __esri.SceneView): P
       }
     })
   })
+
+  await waitForLayerViewsReady(view)
+}
+
+/** Aguarda camadas visíveis terminarem de desenhar (basemap, imagery, etc.). */
+export const waitForLayerViewsReady = async (
+  view: __esri.MapView | __esri.SceneView
+): Promise<void> => {
+  const map = view.map
+  if (!map) return
+
+  const layers = map.allLayers?.toArray?.() ?? []
+  const waits: Promise<void>[] = []
+
+  for (const layer of layers) {
+    if (!layer?.visible) continue
+    try {
+      const lv = await view.whenLayerView(layer)
+      if (!lv) continue
+      if (!lv.updating) continue
+      waits.push(
+        new Promise<void>((resolve) => {
+          const timeout = window.setTimeout(() => {
+            handle?.remove?.()
+            resolve()
+          }, VIEW_READY_TIMEOUT_MS)
+          const handle = lv.watch('updating', (updating: boolean) => {
+            if (!updating) {
+              window.clearTimeout(timeout)
+              handle.remove()
+              resolve()
+            }
+          })
+        })
+      )
+    } catch {
+      // layer view indisponível
+    }
+  }
+
+  if (waits.length) await Promise.all(waits)
+  await new Promise<void>((resolve) => window.setTimeout(resolve, 400))
+}
+
+interface ViewSizeRestore {
+  restore: () => void
+}
+
+/**
+ * No Experience publicado o mapa pode estar em painel oculto (largura/altura 0).
+ * Ajusta temporariamente o container para permitir renderização do screenshot.
+ */
+export const ensureViewRenderableForCapture = async (
+  view: __esri.MapView | __esri.SceneView
+): Promise<ViewSizeRestore | null> => {
+  if (view.width >= MIN_VIEW_WIDTH && view.height >= MIN_VIEW_HEIGHT) {
+    return null
+  }
+
+  const container = view.container as HTMLElement | undefined
+  if (!container) return null
+
+  const saved = {
+    width: container.style.width,
+    height: container.style.height,
+    minWidth: container.style.minWidth,
+    minHeight: container.style.minHeight,
+    display: container.style.display,
+    visibility: container.style.visibility
+  }
+
+  container.style.width = `${SCREENSHOT_WIDTH}px`
+  container.style.height = `${SCREENSHOT_HEIGHT}px`
+  container.style.minWidth = `${SCREENSHOT_WIDTH}px`
+  container.style.minHeight = `${SCREENSHOT_HEIGHT}px`
+  if (saved.display === 'none') container.style.display = 'block'
+  if (saved.visibility === 'hidden') container.style.visibility = 'visible'
+
+  try {
+    container.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
+    view.resize()
+    await waitForViewStationary(view)
+  } catch {
+    // segue com dimensões atuais
+  }
+
+  return {
+    restore: () => {
+      container.style.width = saved.width
+      container.style.height = saved.height
+      container.style.minWidth = saved.minWidth
+      container.style.minHeight = saved.minHeight
+      container.style.display = saved.display
+      container.style.visibility = saved.visibility
+      try {
+        view.resize()
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
+/** Detecta screenshot vazio (mapa não renderizado — comum em painel oculto no Enterprise). */
+export const isScreenshotMostlyBlank = async (dataUrl: string): Promise<boolean> => {
+  if (!dataUrl || dataUrl.length < 120) return true
+
+  return await new Promise<boolean>((resolve) => {
+    const img = new Image()
+    img.onload = () => {
+      try {
+        const sampleW = Math.min(48, img.width)
+        const sampleH = Math.min(48, img.height)
+        const canvas = document.createElement('canvas')
+        canvas.width = sampleW
+        canvas.height = sampleH
+        const ctx = canvas.getContext('2d')
+        if (!ctx) {
+          resolve(false)
+          return
+        }
+        ctx.drawImage(img, 0, 0, sampleW, sampleH)
+        const pixels = ctx.getImageData(0, 0, sampleW, sampleH).data
+        let sum = 0
+        let sumSq = 0
+        let n = 0
+        for (let i = 0; i < pixels.length; i += 4) {
+          const lum =
+            pixels[i] * 0.299 + pixels[i + 1] * 0.587 + pixels[i + 2] * 0.114
+          sum += lum
+          sumSq += lum * lum
+          n++
+        }
+        if (n === 0) {
+          resolve(true)
+          return
+        }
+        const mean = sum / n
+        const variance = sumSq / n - mean * mean
+        resolve(mean > 238 && variance < 90)
+      } catch {
+        resolve(false)
+      }
+    }
+    img.onerror = () => resolve(true)
+    img.src = dataUrl
+  })
+}
+
+/** Reduz tamanho do PDF convertendo para JPEG com largura máxima. */
+export const optimizeMapImageForPdf = async (
+  dataUrl: string,
+  maxWidth = PDF_IMAGE_MAX_WIDTH
+): Promise<{ dataUrl: string; width: number; height: number; format: MapImageFormat }> => {
+  return await new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => {
+      try {
+        const scale = img.width > maxWidth ? maxWidth / img.width : 1
+        const width = Math.max(1, Math.round(img.width * scale))
+        const height = Math.max(1, Math.round(img.height * scale))
+        const canvas = document.createElement('canvas')
+        canvas.width = width
+        canvas.height = height
+        const ctx = canvas.getContext('2d')
+        if (!ctx) {
+          reject(new Error('canvas'))
+          return
+        }
+        ctx.fillStyle = '#ffffff'
+        ctx.fillRect(0, 0, width, height)
+        ctx.drawImage(img, 0, 0, width, height)
+        resolve({
+          dataUrl: canvas.toDataURL('image/jpeg', SCREENSHOT_JPEG_QUALITY),
+          width,
+          height,
+          format: 'JPEG'
+        })
+      } catch (e) {
+        reject(e)
+      }
+    }
+    img.onerror = () => reject(new Error('image load failed'))
+    img.src = dataUrl
+  })
+}
+
+const pickLargestMapView = async (
+  candidates: JimuMapView[]
+): Promise<JimuMapView | null> => {
+  let best: JimuMapView | null = null
+  let bestArea = 0
+
+  for (const candidate of candidates) {
+    if (!candidate || !(await waitForViewReady(candidate))) continue
+    const area = viewPixelArea(candidate)
+    if (area > bestArea) {
+      bestArea = area
+      best = candidate
+    }
+  }
+
+  return best
 }
 
 const resolveFromMapWidgetIds = async (
@@ -151,17 +371,18 @@ const resolveFromMapWidgetIds = async (
   if (!mapWidgetIds.length) return null
 
   const manager = MapViewManager.getInstance()
+  const candidates: JimuMapView[] = []
 
   for (const mapWidgetId of mapWidgetIds) {
     try {
       const group = manager.getJimuMapViewGroup(mapWidgetId)
       const active = group?.getActiveJimuMapView?.()
-      if (active && await waitForViewReady(active)) return active
+      if (active) candidates.push(active)
 
       const views = group?.getAllJimuMapViews?.() ?? []
-      for (const view of views) {
-        if (view && await waitForViewReady(view)) return view
-      }
+      views.forEach((view) => {
+        if (view) candidates.push(view)
+      })
     } catch {
       // grupo ainda não criado para este widget de mapa
     }
@@ -170,14 +391,17 @@ const resolveFromMapWidgetIds = async (
       const viewIds = manager.getAllJimuMapViewIds?.() ?? []
       for (const viewId of viewIds) {
         const jimuMapView = manager.getJimuMapViewById(viewId)
-        if (jimuMapView?.mapWidgetId === mapWidgetId && await waitForViewReady(jimuMapView)) {
-          return jimuMapView
+        if (jimuMapView?.mapWidgetId === mapWidgetId) {
+          candidates.push(jimuMapView)
         }
       }
     } catch {
       // ignore
     }
   }
+
+  const picked = await pickLargestMapView(candidates)
+  if (picked) return picked
 
   return null
 }
@@ -187,29 +411,38 @@ const resolveFromRegisteredViews = async (
 ): Promise<JimuMapView | null> => {
   const manager = MapViewManager.getInstance()
   const allViews = manager.getAllJimuMapViews?.() ?? []
+  const withLayer: JimuMapView[] = []
+  const anyReady: JimuMapView[] = []
 
   if (layerDataSourceIds.length > 0) {
     for (const jimuMapView of allViews) {
       if (!jimuMapView || !mapContainsLayer(jimuMapView, layerDataSourceIds)) continue
-      if (await waitForViewReady(jimuMapView)) return jimuMapView
+      withLayer.push(jimuMapView)
     }
   }
 
   for (const jimuMapView of allViews) {
-    if (jimuMapView && await waitForViewReady(jimuMapView)) return jimuMapView
+    if (jimuMapView) anyReady.push(jimuMapView)
   }
 
+  const pickedWithLayer = await pickLargestMapView(withLayer)
+  if (pickedWithLayer) return pickedWithLayer
+
+  const pickedAny = await pickLargestMapView(anyReady)
+  if (pickedAny) return pickedAny
+
   const viewIds = manager.getAllJimuMapViewIds?.() ?? []
+  const byId: JimuMapView[] = []
   for (const viewId of viewIds) {
     try {
       const jimuMapView = manager.getJimuMapViewById(viewId)
-      if (jimuMapView && await waitForViewReady(jimuMapView)) return jimuMapView
+      if (jimuMapView) byId.push(jimuMapView)
     } catch {
       // ignore
     }
   }
 
-  return null
+  return pickLargestMapView(byId)
 }
 
 /**
@@ -223,15 +456,13 @@ export const resolveJimuMapViewForReport = async (options: {
 }): Promise<JimuMapView | null> => {
   const { activeMapView, useMapWidgetIds = [], layerDataSourceIds = [] } = options
 
-  if (activeMapView && await waitForViewReady(activeMapView)) {
+  if (activeMapView && (await waitForViewReady(activeMapView))) {
     return activeMapView
   }
 
   const configuredIds = useMapWidgetIds.filter(Boolean)
   const autoIds = discoverArcgisMapWidgetIds()
-  const mapWidgetIds = configuredIds.length > 0
-    ? configuredIds
-    : autoIds
+  const mapWidgetIds = configuredIds.length > 0 ? configuredIds : autoIds
 
   const fromWidgets = await resolveFromMapWidgetIds(mapWidgetIds)
   if (fromWidgets) return fromWidgets
@@ -246,7 +477,7 @@ export const waitForActiveMapView = async (
   const started = Date.now()
   while (Date.now() - started < timeoutMs) {
     const current = getView()
-    if (current && await waitForViewReady(current)) return current
+    if (current && (await waitForViewReady(current))) return current
     await new Promise<void>((resolve) => window.setTimeout(resolve, 150))
   }
   const last = getView()
@@ -257,6 +488,7 @@ export interface MapScreenshotResult {
   dataUrl: string
   width: number
   height: number
+  format: MapImageFormat
 }
 
 const hasGeometryData = (geometry: IGeometry | undefined | null): boolean => {
@@ -386,6 +618,25 @@ export const fitMapViewToRecords = async (
   }
 }
 
+const takeRawScreenshot = async (
+  view: __esri.MapView | __esri.SceneView,
+  width: number,
+  height: number
+): Promise<string | null> => {
+  try {
+    const screenshot = await view.takeScreenshot({
+      width,
+      height,
+      format: 'jpg',
+      quality: Math.round(SCREENSHOT_JPEG_QUALITY * 100)
+    })
+    return screenshot?.dataUrl ?? null
+  } catch (err) {
+    console.warn('[relatorio_MCR] takeScreenshot falhou:', err)
+    return null
+  }
+}
+
 /** Captura a visualização do mapa, enquadrando o imóvel selecionado quando possível. */
 export const captureMapScreenshot = async (
   jimuMapView: JimuMapView,
@@ -408,20 +659,147 @@ export const captureMapScreenshot = async (
     await fitMapViewToRecords(jimuMapView, recordsWithGeom)
   }
 
-  await waitForViewStationary(view)
+  const sizeRestore = await ensureViewRenderableForCapture(view)
 
-  const viewW = view.width > 0 ? view.width : SCREENSHOT_WIDTH
-  const viewH = view.height > 0 ? view.height : SCREENSHOT_HEIGHT
-  const scale = (options?.width ?? SCREENSHOT_WIDTH) / viewW
-  const width = Math.round(viewW * scale)
-  const height = Math.round(viewH * scale)
-  const screenshot = await view.takeScreenshot({ width, height })
-  const dataUrl = screenshot?.dataUrl
-  if (!dataUrl) return null
+  try {
+    await waitForViewStationary(view)
 
-  return {
-    dataUrl,
-    width: screenshot?.data?.width ?? width,
-    height: screenshot?.data?.height ?? height
+    const targetWidth = options?.width ?? SCREENSHOT_WIDTH
+    const viewW = view.width > 0 ? view.width : SCREENSHOT_WIDTH
+    const viewH = view.height > 0 ? view.height : SCREENSHOT_HEIGHT
+    const scale = targetWidth / viewW
+    const width = Math.round(viewW * scale)
+    const height = Math.round(viewH * scale)
+
+    for (const delay of SCREENSHOT_RETRY_DELAYS_MS) {
+      if (delay > 0) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, delay))
+        await waitForViewStationary(view)
+      }
+
+      const dataUrl = await takeRawScreenshot(view, width, height)
+      if (!dataUrl) continue
+
+      if (await isScreenshotMostlyBlank(dataUrl)) {
+        console.warn('[relatorio_MCR] Screenshot em branco; nova tentativa…')
+        continue
+      }
+
+      try {
+        const optimized = await optimizeMapImageForPdf(dataUrl, PDF_IMAGE_MAX_WIDTH)
+        return {
+          dataUrl: optimized.dataUrl,
+          width: optimized.width,
+          height: optimized.height,
+          format: optimized.format
+        }
+      } catch {
+        return {
+          dataUrl,
+          width,
+          height,
+          format: 'JPEG'
+        }
+      }
+    }
+
+    return null
+  } finally {
+    sizeRestore?.restore()
   }
+}
+
+const collectCandidateMapViews = async (options: {
+  activeMapView?: JimuMapView | null
+  getActiveMapView?: () => JimuMapView | null
+  useMapWidgetIds: string[]
+  layerDataSourceIds: string[]
+}): Promise<JimuMapView[]> => {
+  const seen = new Set<string>()
+  const candidates: JimuMapView[] = []
+
+  const add = (view: JimuMapView | null | undefined) => {
+    if (!view?.view) return
+    const key = `${view.mapWidgetId ?? ''}:${view.id ?? ''}`
+    if (seen.has(key)) return
+    seen.add(key)
+    candidates.push(view)
+  }
+
+  add(options.activeMapView ?? null)
+  add(options.getActiveMapView?.() ?? null)
+
+  const configuredIds = options.useMapWidgetIds.filter(Boolean)
+  const mapWidgetIds =
+    configuredIds.length > 0 ? configuredIds : discoverArcgisMapWidgetIds()
+
+  const manager = MapViewManager.getInstance()
+  for (const mapWidgetId of mapWidgetIds) {
+    try {
+      const group = manager.getJimuMapViewGroup(mapWidgetId)
+      add(group?.getActiveJimuMapView?.() ?? null)
+      ;(group?.getAllJimuMapViews?.() ?? []).forEach((v) => add(v))
+    } catch {
+      // ignore
+    }
+  }
+
+  const allViews = manager.getAllJimuMapViews?.() ?? []
+  for (const view of allViews) {
+    if (
+      options.layerDataSourceIds.length > 0 &&
+      !mapContainsLayer(view, options.layerDataSourceIds)
+    ) {
+      continue
+    }
+    add(view)
+  }
+
+  for (const view of allViews) add(view)
+
+  const ready: JimuMapView[] = []
+  for (const view of candidates) {
+    if (await waitForViewReady(view)) ready.push(view)
+  }
+
+  return ready.sort((a, b) => viewPixelArea(b) - viewPixelArea(a))
+}
+
+/**
+ * Resolve mapas candidatos e captura imagem para o PDF (várias tentativas).
+ */
+export const captureMapForPdfReport = async (options: {
+  activeMapView?: JimuMapView | null
+  getActiveMapView?: () => JimuMapView | null
+  useMapWidgetIds: string[]
+  layerDataSourceIds: string[]
+  records: DataRecord[]
+  mainDataSource: DataSource | null
+}): Promise<MapScreenshotResult | null> => {
+  for (const passDelay of CAPTURE_PASS_DELAYS_MS) {
+    if (passDelay > 0) {
+      await new Promise<void>((resolve) => window.setTimeout(resolve, passDelay))
+    }
+
+    let candidates = await collectCandidateMapViews(options)
+
+    if (!candidates.length) {
+      const resolved = await resolveJimuMapViewForReport({
+        activeMapView: options.activeMapView ?? options.getActiveMapView?.() ?? null,
+        useMapWidgetIds: options.useMapWidgetIds,
+        layerDataSourceIds: options.layerDataSourceIds
+      })
+      if (resolved) candidates = [resolved]
+    }
+
+    for (const jimuMapView of candidates) {
+      const shot = await captureMapScreenshot(jimuMapView, {
+        records: options.records,
+        mainDataSource: options.mainDataSource
+      })
+      if (shot) return shot
+    }
+  }
+
+  return null
 }

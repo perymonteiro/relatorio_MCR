@@ -13,10 +13,8 @@ import brasao from '../assets/brasaobrasil.png'
 import { Button, Loading } from 'jimu-ui'
 import { JimuMapViewComponent, type JimuMapView } from 'jimu-arcgis'
 import {
-  resolveJimuMapViewForReport,
-  captureMapScreenshot,
+  captureMapForPdfReport,
   collectRelatedDataSourceIds,
-  waitForActiveMapView,
   discoverArcgisMapWidgetIds,
   type MapScreenshotResult
 } from '../utils/map-screenshot'
@@ -154,8 +152,7 @@ const addMapSectionToPdf = (
   margin: number,
   pageW: number,
   pageH: number,
-  mapScreenshot: MapScreenshotResult | null,
-  mapUnavailableMessage: string
+  mapScreenshot: MapScreenshotResult
 ): number => {
   const contentMaxWidth = pageW - margin * 2
   const footerReserve = 14
@@ -171,19 +168,12 @@ const addMapSectionToPdf = (
   const mapAreaTop = titleY + titleBlockHeight
   const mapAreaHeight = pageH - mapAreaTop - margin - footerReserve
 
-  if (!mapScreenshot) {
-    const lines = pdf.splitTextToSize(mapUnavailableMessage, contentMaxWidth) as string[]
-    let cursorY = mapAreaTop
-    lines.forEach((line) => {
-      pdf.setFont('helvetica', 'italic')
-      pdf.text(line, pageW / 2, cursorY, { align: 'center' })
-      cursorY += 5
-    })
-    pdf.setFont('helvetica', 'normal')
-    return cursorY
-  }
-
-  const { dataUrl: mapImageDataUrl, width: imgW, height: imgH } = mapScreenshot
+  const {
+    dataUrl: mapImageDataUrl,
+    width: imgW,
+    height: imgH,
+    format: mapFormat
+  } = mapScreenshot
   const aspect = imgH / imgW
 
   let drawW = contentMaxWidth
@@ -201,12 +191,13 @@ const addMapSectionToPdf = (
   const imgX = (pageW - drawW) / 2
   const imgY = mapAreaTop
 
-  pdf.addImage(mapImageDataUrl, 'PNG', imgX, imgY, drawW, drawH)
+  pdf.addImage(mapImageDataUrl, mapFormat, imgX, imgY, drawW, drawH)
   return imgY + drawH + 6
 }
 
 const Widget = (props: AllWidgetProps<IMConfig>) => {
   const [isGenerating, setIsGenerating] = React.useState(false)
+  const [generatingPhase, setGeneratingPhase] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [dsRef, setDsRef] = React.useState<DataSource | null>(null)
   const [dsStatus, setDsStatus] = React.useState<DataSourceStatus | undefined>(undefined)
@@ -319,6 +310,7 @@ const Widget = (props: AllWidgetProps<IMConfig>) => {
     }
 
     setIsGenerating(true)
+    setGeneratingPhase('Montando relatório…')
     try {
       const recs = await ensureSelectedRecordsWithAllAttributes()
       const pdf = new jsPDF('p', 'mm', 'a4')
@@ -441,52 +433,28 @@ const Widget = (props: AllWidgetProps<IMConfig>) => {
           getMainDataSource(dsRef),
           useDs?.dataSourceId
         )
+        setGeneratingPhase('Capturando imagem do mapa…')
         let mapScreenshot: MapScreenshotResult | null = null
-        let mapUnavailableMessage =
-          'Mapa indisponível. Vincule o widget de mapa nas configurações, aguarde o mapa carregar e tente novamente.'
-
         try {
-          let jimuMapView = jimuMapViewRef.current
-          if (!jimuMapView?.view) {
-            jimuMapView = await waitForActiveMapView(() => jimuMapViewRef.current)
-          }
-          if (!jimuMapView?.view) {
-            jimuMapView = await resolveJimuMapViewForReport({
-              activeMapView: jimuMapViewRef.current,
-              useMapWidgetIds,
-              layerDataSourceIds
-            })
-          }
-          if (jimuMapView) {
-            mapScreenshot = await captureMapScreenshot(jimuMapView, {
-              records: recs,
-              mainDataSource: getMainDataSource(dsRef)
-            })
-            if (!mapScreenshot) {
-              mapUnavailableMessage =
-                'Não foi possível capturar a imagem do mapa. Aguarde o zoom na feição terminar e tente novamente.'
-            }
-          } else if (!mapWidgetIdForView) {
-            mapUnavailableMessage =
-              'Nenhum mapa encontrado. Nas configurações desta widget, seção "Mapa no PDF", selecione o widget Map da página.'
-          } else {
-            mapUnavailableMessage =
-              'O mapa vinculado ainda não está pronto. Abra a página com o mapa visível, aguarde o carregamento e tente novamente.'
-          }
+          mapScreenshot = await captureMapForPdfReport({
+            activeMapView: jimuMapViewRef.current,
+            getActiveMapView: () => jimuMapViewRef.current,
+            useMapWidgetIds,
+            layerDataSourceIds,
+            records: recs,
+            mainDataSource: getMainDataSource(dsRef)
+          })
         } catch (mapErr) {
           console.warn('[relatorio_MCR] Falha ao capturar mapa para o PDF:', mapErr)
-          mapUnavailableMessage =
-            'Erro ao capturar o mapa. Verifique o console do navegador (F12) para detalhes.'
         }
 
-        cursorY = addMapSectionToPdf(
-          pdf,
-          margin,
-          pageW,
-          pageH,
-          mapScreenshot,
-          mapUnavailableMessage
-        )
+        if (mapScreenshot) {
+          addMapSectionToPdf(pdf, margin, pageW, pageH, mapScreenshot)
+        } else {
+          console.warn(
+            '[relatorio_MCR] Imagem do mapa não capturada; PDF gerado sem página de mapa.'
+          )
+        }
       } else {
         pdf.setFont('helvetica', 'italic').text('Nenhuma feição selecionada.', margin, cursorY)
       }
@@ -502,8 +470,9 @@ const Widget = (props: AllWidgetProps<IMConfig>) => {
       setError('Falha ao gerar o PDF. Veja o console para detalhes.')
     } finally {
       setIsGenerating(false)
+      setGeneratingPhase(null)
     }
-  }, [useDs, dsRef, dsStatus, ensureSelectedRecordsWithAllAttributes, buildRowsFromRecords, anosProdes, useMapWidgetIds, mapWidgetIdForView, getMainDataSource])
+  }, [useDs, dsRef, dsStatus, ensureSelectedRecordsWithAllAttributes, buildRowsFromRecords, anosProdes, useMapWidgetIds, getMainDataSource])
 
   const isReady = !!dsRef && (
     dsStatus === DataSourceStatus.Loaded ||
@@ -529,6 +498,9 @@ const Widget = (props: AllWidgetProps<IMConfig>) => {
       <Button type="primary" onClick={gerarPDF} disabled={isGenerating || !isReady}>
         {isGenerating ? <Loading /> : 'Gerar PDF'}
       </Button>
+      {isGenerating && generatingPhase && (
+        <div style={{ marginTop: 8, fontSize: 12, color: '#555' }}>{generatingPhase}</div>
+      )}
 
       {error && (
         <div style={{ marginTop: 8, color: '#b00020', background: '#fde7e9', padding: 8, borderRadius: 4 }}>
