@@ -12,13 +12,14 @@ import {
 } from 'jimu-core'
 import type { IGeometry } from '@esri/arcgis-rest-request'
 
-const VIEW_READY_TIMEOUT_MS = 20000
+const VIEW_READY_TIMEOUT_MS = 30000
 const SCREENSHOT_WIDTH = 900
 const SCREENSHOT_HEIGHT = 675
 const MIN_VIEW_WIDTH = 320
 const MIN_VIEW_HEIGHT = 240
-const SCREENSHOT_RETRY_DELAYS_MS = [0, 600, 1200, 2000, 3500, 5000]
-const CAPTURE_PASS_DELAYS_MS = [0, 1500, 3000]
+const SCREENSHOT_RETRY_DELAYS_MS = [0, 800, 1600, 2500, 4000, 6000, 8000, 10000]
+const CAPTURE_PASS_DELAYS_MS = [0, 2000, 4000, 6000, 8000]
+const OFFSCREEN_HOST_ID = 'relatorio-mcr-export-host'
 const SCREENSHOT_JPEG_QUALITY = 0.82
 const PDF_IMAGE_MAX_WIDTH = 900
 /** Margem extra ao enquadrar o imóvel (expand no extent + padding em px no goTo). */
@@ -204,24 +205,143 @@ export const waitForLayerViewsReady = async (
   await new Promise<void>((resolve) => window.setTimeout(resolve, 400))
 }
 
-interface ViewSizeRestore {
+interface ViewCaptureRestore {
   restore: () => void
 }
 
+const getOrCreateOffscreenHost = (): HTMLDivElement => {
+  let host = document.getElementById(OFFSCREEN_HOST_ID) as HTMLDivElement | null
+  if (!host) {
+    host = document.createElement('div')
+    host.id = OFFSCREEN_HOST_ID
+    host.setAttribute('aria-hidden', 'true')
+    document.body.appendChild(host)
+  }
+  host.style.cssText = [
+    'position:fixed',
+    'left:0',
+    'top:0',
+    `width:${SCREENSHOT_WIDTH}px`,
+    `height:${SCREENSHOT_HEIGHT}px`,
+    'opacity:0.01',
+    'pointer-events:none',
+    'z-index:1',
+    'overflow:hidden'
+  ].join(';')
+  return host
+}
+
+/** Revela ancestrais com display:none (painéis fechados no Experience). */
+const uncoverAncestorStyles = (element: HTMLElement): (() => void) => {
+  const restores: Array<() => void> = []
+  let el: HTMLElement | null = element.parentElement
+
+  while (el && el !== document.body) {
+    const computed = window.getComputedStyle(el)
+    const needsDisplay = computed.display === 'none'
+    const needsVisibility = computed.visibility === 'hidden'
+    const needsOpacity = parseFloat(computed.opacity) < 0.01
+
+    if (needsDisplay || needsVisibility || needsOpacity) {
+      const saved = {
+        display: el.style.display,
+        visibility: el.style.visibility,
+        opacity: el.style.opacity
+      }
+      if (needsDisplay) el.style.display = 'block'
+      if (needsVisibility) el.style.visibility = 'visible'
+      if (needsOpacity) el.style.opacity = '1'
+      restores.push(() => {
+        el!.style.display = saved.display
+        el!.style.visibility = saved.visibility
+        el!.style.opacity = saved.opacity
+      })
+    }
+    el = el.parentElement
+  }
+
+  return () => restores.reverse().forEach((fn) => fn())
+}
+
 /**
- * No Experience publicado o mapa pode estar em painel oculto (largura/altura 0).
- * Ajusta temporariamente o container para permitir renderização do screenshot.
+ * Move o container do MapView para um host fixo no body (fora de painéis ocultos).
+ * Padrão confiável para takeScreenshot no Experience publicado.
+ */
+export const attachViewToExportHost = (
+  view: __esri.MapView | __esri.SceneView
+): ViewCaptureRestore | null => {
+  const container = view.container as HTMLElement | undefined
+  if (!container) return null
+
+  const host = getOrCreateOffscreenHost()
+  const placeholder = document.createComment('relatorio-mcr-map-placeholder')
+  const parent = container.parentNode
+  if (parent) parent.insertBefore(placeholder, container)
+
+  const saved = {
+    width: container.style.width,
+    height: container.style.height,
+    minWidth: container.style.minWidth,
+    minHeight: container.style.minHeight,
+    flex: container.style.flex,
+    position: container.style.position
+  }
+
+  host.appendChild(container)
+  container.style.width = '100%'
+  container.style.height = '100%'
+  container.style.minWidth = `${SCREENSHOT_WIDTH}px`
+  container.style.minHeight = `${SCREENSHOT_HEIGHT}px`
+  container.style.flex = 'none'
+  container.style.position = 'relative'
+
+  try {
+    view.resize()
+  } catch {
+    // ignore
+  }
+
+  return {
+    restore: () => {
+      try {
+        if (placeholder.parentNode && container.parentNode === host) {
+          placeholder.parentNode.insertBefore(container, placeholder)
+          placeholder.remove()
+        } else if (container.parentNode === host && parent) {
+          parent.appendChild(container)
+        }
+      } catch {
+        // ignore
+      }
+      container.style.width = saved.width
+      container.style.height = saved.height
+      container.style.minWidth = saved.minWidth
+      container.style.minHeight = saved.minHeight
+      container.style.flex = saved.flex
+      container.style.position = saved.position
+      try {
+        view.resize()
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
+/**
+ * Garante dimensões mínimas no lugar (fallback se reparent não for usado).
  */
 export const ensureViewRenderableForCapture = async (
   view: __esri.MapView | __esri.SceneView
-): Promise<ViewSizeRestore | null> => {
+): Promise<ViewCaptureRestore | null> => {
+  const container = view.container as HTMLElement | undefined
+  if (!container) return null
+
   if (view.width >= MIN_VIEW_WIDTH && view.height >= MIN_VIEW_HEIGHT) {
     return null
   }
 
-  const container = view.container as HTMLElement | undefined
-  if (!container) return null
-
+  const uncover = uncoverAncestorStyles(container)
   const saved = {
     width: container.style.width,
     height: container.style.height,
@@ -235,19 +355,23 @@ export const ensureViewRenderableForCapture = async (
   container.style.height = `${SCREENSHOT_HEIGHT}px`
   container.style.minWidth = `${SCREENSHOT_WIDTH}px`
   container.style.minHeight = `${SCREENSHOT_HEIGHT}px`
-  if (saved.display === 'none') container.style.display = 'block'
-  if (saved.visibility === 'hidden') container.style.visibility = 'visible'
+  if (window.getComputedStyle(container).display === 'none') {
+    container.style.display = 'block'
+  }
+  if (window.getComputedStyle(container).visibility === 'hidden') {
+    container.style.visibility = 'visible'
+  }
 
   try {
-    container.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
     view.resize()
     await waitForViewStationary(view)
   } catch {
-    // segue com dimensões atuais
+    // segue
   }
 
   return {
     restore: () => {
+      uncover()
       container.style.width = saved.width
       container.style.height = saved.height
       container.style.minWidth = saved.minWidth
@@ -261,6 +385,52 @@ export const ensureViewRenderableForCapture = async (
       }
     }
   }
+}
+
+/** Pontuação de conteúdo (maior = mais detalhe visual, menos branco). */
+export const scoreScreenshotContent = async (dataUrl: string): Promise<number> => {
+  if (!dataUrl || dataUrl.length < 120) return 0
+
+  return await new Promise<number>((resolve) => {
+    const img = new Image()
+    img.onload = () => {
+      try {
+        const sampleW = Math.min(64, img.width)
+        const sampleH = Math.min(64, img.height)
+        const canvas = document.createElement('canvas')
+        canvas.width = sampleW
+        canvas.height = sampleH
+        const ctx = canvas.getContext('2d')
+        if (!ctx) {
+          resolve(0)
+          return
+        }
+        ctx.drawImage(img, 0, 0, sampleW, sampleH)
+        const pixels = ctx.getImageData(0, 0, sampleW, sampleH).data
+        let sum = 0
+        let sumSq = 0
+        let n = 0
+        for (let i = 0; i < pixels.length; i += 4) {
+          const lum =
+            pixels[i] * 0.299 + pixels[i + 1] * 0.587 + pixels[i + 2] * 0.114
+          sum += lum
+          sumSq += lum * lum
+          n++
+        }
+        if (n === 0) {
+          resolve(0)
+          return
+        }
+        const mean = sum / n
+        const variance = sumSq / n - mean * mean
+        resolve(Math.max(0, variance))
+      } catch {
+        resolve(0)
+      }
+    }
+    img.onerror = () => resolve(0)
+    img.src = dataUrl
+  })
 }
 
 /** Detecta screenshot vazio (mapa não renderizado — comum em painel oculto no Enterprise). */
@@ -299,7 +469,7 @@ export const isScreenshotMostlyBlank = async (dataUrl: string): Promise<boolean>
         }
         const mean = sum / n
         const variance = sumSq / n - mean * mean
-        resolve(mean > 238 && variance < 90)
+        resolve(mean > 245 && variance < 50)
       } catch {
         resolve(false)
       }
@@ -637,6 +807,24 @@ const takeRawScreenshot = async (
   }
 }
 
+const finalizeScreenshot = async (
+  dataUrl: string,
+  width: number,
+  height: number
+): Promise<MapScreenshotResult> => {
+  try {
+    const optimized = await optimizeMapImageForPdf(dataUrl, PDF_IMAGE_MAX_WIDTH)
+    return {
+      dataUrl: optimized.dataUrl,
+      width: optimized.width,
+      height: optimized.height,
+      format: optimized.format
+    }
+  } catch {
+    return { dataUrl, width, height, format: 'JPEG' }
+  }
+}
+
 /** Captura a visualização do mapa, enquadrando o imóvel selecionado quando possível. */
 export const captureMapScreenshot = async (
   jimuMapView: JimuMapView,
@@ -645,24 +833,35 @@ export const captureMapScreenshot = async (
     height?: number
     records?: DataRecord[]
     mainDataSource?: DataSource | null
+    allowBestEffort?: boolean
   }
 ): Promise<MapScreenshotResult | null> => {
   const view = jimuMapView.view
   if (!view) return null
 
   const records = options?.records ?? []
-  if (records.length > 0) {
-    const mainDs = options?.mainDataSource
-    const recordsWithGeom = mainDs
-      ? await ensureRecordsWithGeometry(mainDs, records)
-      : records
+  let recordsWithGeom = records
+  if (records.length > 0 && options?.mainDataSource) {
+    recordsWithGeom = await ensureRecordsWithGeometry(
+      options.mainDataSource,
+      records
+    )
+  }
+  if (recordsWithGeom.length > 0) {
     await fitMapViewToRecords(jimuMapView, recordsWithGeom)
   }
 
-  const sizeRestore = await ensureViewRenderableForCapture(view)
+  const hostRestore = attachViewToExportHost(view)
+  const sizeRestore = hostRestore ? null : await ensureViewRenderableForCapture(view)
+
+  let bestEffort: { dataUrl: string; width: number; height: number; score: number } | null =
+    null
 
   try {
     await waitForViewStationary(view)
+    if (hostRestore && recordsWithGeom.length > 0) {
+      await fitMapViewToRecords(jimuMapView, recordsWithGeom)
+    }
 
     const targetWidth = options?.width ?? SCREENSHOT_WIDTH
     const viewW = view.width > 0 ? view.width : SCREENSHOT_WIDTH
@@ -671,7 +870,10 @@ export const captureMapScreenshot = async (
     const width = Math.round(viewW * scale)
     const height = Math.round(viewH * scale)
 
-    for (const delay of SCREENSHOT_RETRY_DELAYS_MS) {
+    for (let i = 0; i < SCREENSHOT_RETRY_DELAYS_MS.length; i++) {
+      const delay = SCREENSHOT_RETRY_DELAYS_MS[i]
+      const isLast = i === SCREENSHOT_RETRY_DELAYS_MS.length - 1
+
       if (delay > 0) {
         await new Promise<void>((resolve) => window.setTimeout(resolve, delay))
         await waitForViewStationary(view)
@@ -680,31 +882,28 @@ export const captureMapScreenshot = async (
       const dataUrl = await takeRawScreenshot(view, width, height)
       if (!dataUrl) continue
 
-      if (await isScreenshotMostlyBlank(dataUrl)) {
-        console.warn('[relatorio_MCR] Screenshot em branco; nova tentativa…')
-        continue
+      const score = await scoreScreenshotContent(dataUrl)
+      if (score > (bestEffort?.score ?? 0)) {
+        bestEffort = { dataUrl, width, height, score }
       }
 
-      try {
-        const optimized = await optimizeMapImageForPdf(dataUrl, PDF_IMAGE_MAX_WIDTH)
-        return {
-          dataUrl: optimized.dataUrl,
-          width: optimized.width,
-          height: optimized.height,
-          format: optimized.format
-        }
-      } catch {
-        return {
-          dataUrl,
-          width,
-          height,
-          format: 'JPEG'
-        }
+      const blank = await isScreenshotMostlyBlank(dataUrl)
+      if (!blank) {
+        return finalizeScreenshot(dataUrl, width, height)
       }
+
+      if (!isLast) {
+        console.warn('[relatorio_MCR] Screenshot em branco; nova tentativa…')
+      }
+    }
+
+    if (options?.allowBestEffort && bestEffort && bestEffort.score > 80) {
+      return finalizeScreenshot(bestEffort.dataUrl, bestEffort.width, bestEffort.height)
     }
 
     return null
   } finally {
+    hostRestore?.restore()
     sizeRestore?.restore()
   }
 }
@@ -775,11 +974,23 @@ export const captureMapForPdfReport = async (options: {
   layerDataSourceIds: string[]
   records: DataRecord[]
   mainDataSource: DataSource | null
+  onProgress?: (message: string) => void
 }): Promise<MapScreenshotResult | null> => {
-  for (const passDelay of CAPTURE_PASS_DELAYS_MS) {
+  const report = (msg: string) => options.onProgress?.(msg)
+
+  for (let pass = 0; pass < CAPTURE_PASS_DELAYS_MS.length; pass++) {
+    const passDelay = CAPTURE_PASS_DELAYS_MS[pass]
+    const isLastPass = pass === CAPTURE_PASS_DELAYS_MS.length - 1
+
     if (passDelay > 0) {
       await new Promise<void>((resolve) => window.setTimeout(resolve, passDelay))
     }
+
+    report(
+      pass === 0
+        ? 'Preparando mapa…'
+        : `Aguardando carregamento do mapa (tentativa ${pass + 1})…`
+    )
 
     let candidates = await collectCandidateMapViews(options)
 
@@ -795,7 +1006,8 @@ export const captureMapForPdfReport = async (options: {
     for (const jimuMapView of candidates) {
       const shot = await captureMapScreenshot(jimuMapView, {
         records: options.records,
-        mainDataSource: options.mainDataSource
+        mainDataSource: options.mainDataSource,
+        allowBestEffort: isLastPass
       })
       if (shot) return shot
     }

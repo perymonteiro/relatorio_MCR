@@ -310,9 +310,43 @@ const Widget = (props: AllWidgetProps<IMConfig>) => {
     }
 
     setIsGenerating(true)
-    setGeneratingPhase('Montando relatório…')
     try {
       const recs = await ensureSelectedRecordsWithAllAttributes()
+      if (!recs.length) {
+        setError('Selecione um imóvel no mapa antes de gerar o relatório.')
+        return
+      }
+
+      const layerDataSourceIds = collectRelatedDataSourceIds(
+        getMainDataSource(dsRef),
+        useDs?.dataSourceId
+      )
+
+      setGeneratingPhase('Capturando imagem do mapa…')
+      let mapScreenshot: MapScreenshotResult | null = null
+      try {
+        mapScreenshot = await captureMapForPdfReport({
+          activeMapView: jimuMapViewRef.current,
+          getActiveMapView: () => jimuMapViewRef.current,
+          useMapWidgetIds,
+          layerDataSourceIds,
+          records: recs,
+          mainDataSource: getMainDataSource(dsRef),
+          onProgress: setGeneratingPhase
+        })
+      } catch (mapErr) {
+        console.warn('[relatorio_MCR] Falha ao capturar mapa para o PDF:', mapErr)
+      }
+
+      if (!mapScreenshot) {
+        setError(
+          'Não foi possível incluir o mapa no relatório. Nas configurações, vincule o widget Map; ' +
+            'deixe o mapa visível na página, aguarde o carregamento completo e tente novamente.'
+        )
+        return
+      }
+
+      setGeneratingPhase('Montando relatório…')
       const pdf = new jsPDF('p', 'mm', 'a4')
       const pageW = pdf.internal.pageSize.getWidth()
       const pageH = pdf.internal.pageSize.getHeight()
@@ -429,32 +463,7 @@ const Widget = (props: AllWidgetProps<IMConfig>) => {
           cursorY += 5 * (Array.isArray(wrapped) ? wrapped.length : 1)
         })
 
-        const layerDataSourceIds = collectRelatedDataSourceIds(
-          getMainDataSource(dsRef),
-          useDs?.dataSourceId
-        )
-        setGeneratingPhase('Capturando imagem do mapa…')
-        let mapScreenshot: MapScreenshotResult | null = null
-        try {
-          mapScreenshot = await captureMapForPdfReport({
-            activeMapView: jimuMapViewRef.current,
-            getActiveMapView: () => jimuMapViewRef.current,
-            useMapWidgetIds,
-            layerDataSourceIds,
-            records: recs,
-            mainDataSource: getMainDataSource(dsRef)
-          })
-        } catch (mapErr) {
-          console.warn('[relatorio_MCR] Falha ao capturar mapa para o PDF:', mapErr)
-        }
-
-        if (mapScreenshot) {
-          addMapSectionToPdf(pdf, margin, pageW, pageH, mapScreenshot)
-        } else {
-          console.warn(
-            '[relatorio_MCR] Imagem do mapa não capturada; PDF gerado sem página de mapa.'
-          )
-        }
+        addMapSectionToPdf(pdf, margin, pageW, pageH, mapScreenshot)
       } else {
         pdf.setFont('helvetica', 'italic').text('Nenhuma feição selecionada.', margin, cursorY)
       }
@@ -508,12 +517,12 @@ const Widget = (props: AllWidgetProps<IMConfig>) => {
         </div>
       )}
 
-      {mapWidgetIdForView && (
+      {mapWidgetIdForView ? (
         <JimuMapViewComponent
           useMapWidgetId={mapWidgetIdForView}
           onActiveViewChange={onActiveMapViewChange}
         />
-      )}
+      ) : null}
     </div>
   )
 }
