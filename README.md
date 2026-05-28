@@ -6,7 +6,7 @@
 
 ## Visão geral
 
-Widget para **ArcGIS Experience Builder Developer** que gera relatórios em PDF a partir de feições selecionadas em uma Feature Layer. Inclui cabeçalho institucional, dados do imóvel, campos de análise MCR, tabela de anos PRODES e imagem do mapa com o imóvel enquadrado.
+Widget para **ArcGIS Experience Builder** que gera relatórios em PDF a partir de feições selecionadas em uma Feature Layer. Inclui cabeçalho institucional, dados do imóvel, campos de análise MCR e tabela de anos PRODES.
 
 Repositório: [github.com/perymonteiro/relatorio_MCR](https://github.com/perymonteiro/relatorio_MCR)
 
@@ -19,9 +19,6 @@ Repositório: [github.com/perymonteiro/relatorio_MCR](https://github.com/perymon
 - PDF com brasão e cabeçalho MMA
 - Campos do registro: resultado, soma do desmatamento, critério, dentro do limite, UUID PRODES
 - Tabela ano × área desmatada (ha)
-- **Imagem do imóvel** em página dedicada (captura do mapa vinculado)
-- Enquadramento automático da geometria do imóvel antes da captura
-- Vinculação ao widget Map da experience (ou detecção automática)
 
 ---
 
@@ -36,7 +33,6 @@ relatorio_MCR/
 │   ├── config.ts
 │   ├── runtime/widget.tsx
 │   ├── setting/setting.tsx
-│   ├── utils/map-screenshot.ts
 │   ├── assets/brasaobrasil.png
 │   └── types/images.d.ts
 ├── tests/
@@ -79,30 +75,27 @@ npm run build:dev
 |--------------|-----------|
 | **Camada** | Feature Layer com os dados MCR |
 | **Anos PRODES** | Anos separados por vírgula (ex.: `2023, 2024`) |
-| **Mapa no PDF** | Widget Map da página (recomendado) |
 
 ---
 
 ## Uso
 
-1. Configure a widget e vincule o mapa.
-2. Selecione uma feição na camada (o mapa deve dar zoom).
+1. Configure a widget e a camada de dados.
+2. Selecione uma feição na camada.
 3. Clique em **Gerar PDF**.
-
-A imagem do mapa é gerada em uma **nova página**, com o título *Imagem da imóvel selecionado*, centralizada na horizontal.
 
 ---
 
 ## Dependências
 
-- `jimu-core`, `jimu-ui`, `jimu-arcgis`
+- `jimu-core`, `jimu-ui`
 - `jsPDF` (incluído no bundle do client EXB)
 
 ---
 
 ## Versão
 
-Consulte `manifest.json` (atual: **2.1.1**).
+Consulte `manifest.json`.
 
 ---
 

@@ -6,7 +6,7 @@ import {
   type ImmutableArray, type UseDataSource,
   AllDataSourceTypes
 } from 'jimu-core'
-import { SettingSection, SettingRow, MapWidgetSelector } from 'jimu-ui/advanced/setting-components'
+import { SettingSection, SettingRow } from 'jimu-ui/advanced/setting-components'
 import { DataSourceSelector } from 'jimu-ui/advanced/data-source-selector'
 import { TextInput } from 'jimu-ui'
 import { type IMConfig } from '../config'
@@ -14,8 +14,7 @@ import { type IMConfig } from '../config'
 interface Props {
   id: string
   useDataSources?: ImmutableArray<UseDataSource>
-  useMapWidgetIds?: ImmutableArray<string>
-  onSettingChange?: (setting: any) => void
+  onSettingChange?: (setting: unknown) => void
   config?: IMConfig
 }
 
@@ -29,7 +28,8 @@ const styles = css`
 `
 
 const anosValidos = (anos: number[]) => {
-  const min = 2019, max = 2030
+  const min = 2019
+  const max = 2030
   return Array.from(new Set(anos))
     .filter((a) => Number.isFinite(a))
     .filter((a) => a >= min && a <= max)
@@ -46,7 +46,7 @@ const parseCsvAnos = (value: string) => {
 }
 
 const Setting = (props: Props) => {
-  const { id, useDataSources, useMapWidgetIds, onSettingChange, config } = props
+  const { id, useDataSources, onSettingChange, config } = props
   const anos = config?.anosProdes ?? []
 
   const handleDataSourceChange = (newUseDataSources: UseDataSource[]) => {
@@ -56,10 +56,6 @@ const Setting = (props: Props) => {
   const handleAnosChange = (value: string) => {
     const novosAnos = parseCsvAnos(value)
     onSettingChange?.({ id, config: { ...config, anosProdes: novosAnos } })
-  }
-
-  const handleMapWidgetSelect = (ids: string[]) => {
-    onSettingChange?.({ id, useMapWidgetIds: ids })
   }
 
   return (
@@ -89,21 +85,6 @@ const Setting = (props: Props) => {
             </div>
           </div>
         </SettingRow>
-      </SettingSection>
-
-      <SettingSection title="Mapa no PDF">
-        <SettingRow label="Widget de mapa">
-          <MapWidgetSelector
-            useMapWidgetIds={useMapWidgetIds}
-            onSelect={handleMapWidgetSelect}
-            autoSelect
-            showLabel
-          />
-        </SettingRow>
-        <div style={{ fontSize: 12, color: '#6b6b6b', padding: '0 16px 8px' }}>
-          O relatório inclui uma captura do mapa com o zoom da feição selecionada.
-          Vincule o mesmo mapa da experience ou deixe em branco para detectar automaticamente.
-        </div>
       </SettingSection>
     </div>
   )
