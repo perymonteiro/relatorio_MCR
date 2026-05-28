@@ -35,9 +35,10 @@ const PDF_FIELDS_AFTER_RESULTADO: Array<{
   }
 ]
 
-const FIELD_LINE_SPACING = 6
+/** Espaçamento vertical entre linhas e entre campos (mm). */
+const FIELD_LINE_SPACING = 5
 /** Espaço horizontal (mm) entre rótulo em negrito e o valor na mesma linha. */
-const LABEL_VALUE_GAP_MM = 1.5
+const LABEL_VALUE_GAP_MM = 2
 
 type PdfContext = {
   pdf: InstanceType<typeof jsPDF>
@@ -46,7 +47,27 @@ type PdfContext = {
   maxWidth: number
 }
 
-/** Linha "rótulo: valor" com espaçamento igual aos demais campos do imóvel. */
+const ensurePdfY = (
+  pdf: InstanceType<typeof jsPDF>,
+  margin: number,
+  pageH: number,
+  y: number
+): number => {
+  if (y > pageH - margin - 8) {
+    pdf.addPage()
+    return margin
+  }
+  return y
+}
+
+/** Próxima posição Y após um campo (um único passo de linha). */
+const nextFieldY = (lastBaseline: number): number =>
+  lastBaseline + FIELD_LINE_SPACING
+
+/**
+ * Campo "rótulo: valor".
+ * labelBold=true → rótulo em negrito e valor na mesma linha (quebras alinhadas ao valor).
+ */
 const writeImovelStyleLine = (
   ctx: PdfContext,
   label: string,
@@ -56,28 +77,22 @@ const writeImovelStyleLine = (
 ): number => {
   const { pdf, margin, pageH, maxWidth } = ctx
   const valueText = value.startsWith(' ') ? value : ` ${value}`
-  let y = startY
-
-  if (y > pageH - ctx.margin - 8) {
-    pdf.addPage()
-    y = ctx.margin
-  }
+  let y = ensurePdfY(pdf, margin, pageH, startY)
+  let lastBaseline = y
 
   if (!labelBold) {
     const fullLine = `${label}${valueText}`
     const lines = pdf.splitTextToSize(fullLine, maxWidth) as string[]
     pdf.setFont('helvetica', 'normal')
     lines.forEach((line, index) => {
-      if (y > pageH - ctx.margin - 8) {
-        pdf.addPage()
-        y = ctx.margin
-      }
+      y = ensurePdfY(pdf, margin, pageH, y)
       pdf.text(line, margin, y)
+      lastBaseline = y
       if (index < lines.length - 1) {
         y += FIELD_LINE_SPACING
       }
     })
-    return y + FIELD_LINE_SPACING
+    return nextFieldY(lastBaseline)
   }
 
   pdf.setFont('helvetica', 'bold')
@@ -94,21 +109,18 @@ const writeImovelStyleLine = (
   pdf.text(label, margin, y)
   pdf.setFont('helvetica', 'normal')
 
-  if (valueLines.length <= 1) {
+  if (valueLines.length > 0) {
     pdf.text(valueLines[0] ?? '', valueX, y)
-    return y + FIELD_LINE_SPACING
+    lastBaseline = y
+    for (let i = 1; i < valueLines.length; i++) {
+      y += FIELD_LINE_SPACING
+      y = ensurePdfY(pdf, margin, pageH, y)
+      pdf.text(valueLines[i], valueX, y)
+      lastBaseline = y
+    }
   }
 
-  pdf.text(valueLines[0] ?? '', valueX, y)
-  for (let i = 1; i < valueLines.length; i++) {
-    y += FIELD_LINE_SPACING
-    if (y > pageH - ctx.margin - 8) {
-      pdf.addPage()
-      y = ctx.margin
-    }
-    pdf.text(valueLines[i], valueX, y)
-  }
-  return y + FIELD_LINE_SPACING
+  return nextFieldY(lastBaseline)
 }
 
 const formatPdfFieldValue = (
@@ -313,7 +325,7 @@ const Widget = (props: AllWidgetProps<IMConfig>) => {
       if (anosProdes.length > 0) {
         pdf.setFont('helvetica', 'italic')
         pdf.text(`Anos PRODES selecionados: ${anosProdes.join(', ')}`, margin, cursorY)
-        cursorY += 6
+        cursorY += FIELD_LINE_SPACING
         pdf.setFont('helvetica', 'normal')
       }
 
@@ -323,7 +335,7 @@ const Widget = (props: AllWidgetProps<IMConfig>) => {
       const codImovelTitulo = String(get('cod_imovel') ?? '(sem cod_imovel)')
       pdf.setFont('helvetica', 'bold')
       pdf.text(`Imóvel selecionado: ${codImovelTitulo}`, margin, cursorY)
-      cursorY += 6
+      cursorY += FIELD_LINE_SPACING
 
       const tipoImovel = String(get('tipo_imove') ?? '(sem tipo)')
       const condicaoCadastro = String(get('condicao') ?? '(sem condição)')
@@ -331,16 +343,16 @@ const Widget = (props: AllWidgetProps<IMConfig>) => {
 
       pdf.setFont('helvetica', 'normal')
       pdf.text(`Tipo do imóvel: ${tipoImovel}`, margin, cursorY)
-      cursorY += 6
+      cursorY += FIELD_LINE_SPACING
       pdf.text(`Condição do cadastro: ${condicaoCadastro}`, margin, cursorY)
-      cursorY += 6
+      cursorY += FIELD_LINE_SPACING
       pdf.text(`Situação do cadastro: ${situacaoCadastro}`, margin, cursorY)
-      cursorY += 6
+      cursorY += FIELD_LINE_SPACING
 
       const municipio = String(get('municipio') ?? '(sem município)')
       const uf = String(get('uf') ?? '(sem UF)')
       pdf.text(`Município/UF: ${municipio}/${uf}`, margin, cursorY)
-      cursorY += 6
+      cursorY += FIELD_LINE_SPACING
 
       const contentMaxWidth = pageW - margin - margin
       const pdfCtx: PdfContext = {
