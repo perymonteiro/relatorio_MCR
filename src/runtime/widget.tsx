@@ -36,6 +36,8 @@ const PDF_FIELDS_AFTER_RESULTADO: Array<{
 ]
 
 const FIELD_LINE_SPACING = 6
+/** Espaço horizontal (mm) entre rótulo em negrito e o valor na mesma linha. */
+const LABEL_VALUE_GAP_MM = 1.5
 
 type PdfContext = {
   pdf: InstanceType<typeof jsPDF>
@@ -80,26 +82,31 @@ const writeImovelStyleLine = (
 
   pdf.setFont('helvetica', 'bold')
   const labelWidth = pdf.getTextWidth(label)
+  const valueX = margin + labelWidth + LABEL_VALUE_GAP_MM
+  const valueMaxWidth = maxWidth - (valueX - margin)
   pdf.setFont('helvetica', 'normal')
-  const valueLines = pdf.splitTextToSize(valueText.trim(), maxWidth - labelWidth) as string[]
+  const valueLines = pdf.splitTextToSize(
+    String(value).trim(),
+    Math.max(valueMaxWidth, 20)
+  ) as string[]
 
   pdf.setFont('helvetica', 'bold')
   pdf.text(label, margin, y)
   pdf.setFont('helvetica', 'normal')
 
   if (valueLines.length <= 1) {
-    pdf.text(valueLines[0] ?? '', margin + labelWidth, y)
+    pdf.text(valueLines[0] ?? '', valueX, y)
     return y + FIELD_LINE_SPACING
   }
 
-  pdf.text(valueLines[0] ?? '', margin + labelWidth, y)
+  pdf.text(valueLines[0] ?? '', valueX, y)
   for (let i = 1; i < valueLines.length; i++) {
     y += FIELD_LINE_SPACING
     if (y > pageH - ctx.margin - 8) {
       pdf.addPage()
       y = ctx.margin
     }
-    pdf.text(valueLines[i], margin, y)
+    pdf.text(valueLines[i], valueX, y)
   }
   return y + FIELD_LINE_SPACING
 }
@@ -351,7 +358,7 @@ const Widget = (props: AllWidgetProps<IMConfig>) => {
         'Resultado:',
         resultadoTxt,
         cursorY,
-        false
+        true
       )
 
       PDF_FIELDS_AFTER_RESULTADO.forEach(({ label, fieldNames, formatAsNumber, labelBold }) => {
